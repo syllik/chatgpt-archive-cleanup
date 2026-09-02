@@ -96,6 +96,23 @@ export interface DiscoveryConfig {
   };
 }
 
+export interface DryRunManifestProvenance {
+  origin: "https://chatgpt.com";
+  discoveryConfigFingerprint: string;
+  accountFingerprint: string | null;
+}
+
+export interface DryRunManifest {
+  schema: 2;
+  kind: "dry-run";
+  createdAt: string;
+  readOnly: true;
+  cutoff: string;
+  mutationsExecuted: 0;
+  provenance: DryRunManifestProvenance;
+  entries: ManifestEntry[];
+}
+
 export interface MutationRequest {
   method: string;
   operation: string;
@@ -110,4 +127,25 @@ export interface ArchiveBundleEvidence {
   method: ArchiveOperation["method"];
   pathTemplate: string;
   bodyKey: ArchiveOperation["bodyKey"];
+}
+
+export type JournalState =
+  | "pending"
+  | "awaiting-verification"
+  | "verified"
+  | "ambiguous";
+
+export interface JournalEntry {
+  id: string;
+  kind: ConversationKind;
+  state: JournalState;
+  at: string;
+}
+
+export interface ExecutionJournal {
+  record(
+    item: Pick<NormalizedConversation, "id" | "kind">,
+    state: JournalState,
+    at: string
+  ): Promise<void>;
 }

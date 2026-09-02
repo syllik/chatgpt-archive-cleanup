@@ -4,6 +4,7 @@ import { classifyConversations, DEFAULT_CUTOFF } from "./filter.js";
 import type { ExecuteManifestResult } from "./manifest.js";
 import type { NormalizedConversation } from "./types.js";
 import type { ProjectInventory } from "./projects.js";
+import type { ExecutionJournal, JournalState } from "./types.js";
 
 export interface ArchiveSnapshot {
   conversations: NormalizedConversation[];
@@ -25,6 +26,7 @@ export interface ArchiveOptions {
   confirmArchive: boolean;
   inventory: InventorySource;
   transport: ArchiveTransport;
+  journal: ExecutionJournal;
   now?: () => Date;
 }
 
@@ -51,16 +53,89 @@ function eligibleItems(snapshot: ArchiveSnapshot, cutoff: string): NormalizedCon
 }
 
 function findEligibleItem(snapshot: ArchiveSnapshot, target: NormalizedConversation, cutoff: string): NormalizedConversation | null {
-  const current = applyProjectStatuses(snapshot.conversations, snapshot.projectInventory)
-    .find((item) => item.id === target.id && item.kind === target.kind);
-  if (current === undefined || classifyConversations([current], cutoff).candidates.length !== 1) {
+  const matching = applyProjectStatuses(snapshot.conversations, snapshot.projectInventory)
+    .filter((item) => item.id === target.id && item.kind === target.kind);
+  const candidates = classifyConversations(matching, cutoff).candidates;
+  if (candidates.length !== 1) {
     return null;
   }
-  return current;
+  return candidates[0] ?? null;
 }
 
 function abort(message: string, results: ExecuteManifestResult[]): never {
   throw new ArchiveAbortedError(message, [...results]);
+}
+
+async function recordState(
+  journal: ExecutionJournal,
+  item: NormalizedConversation,
+  state: JournalState,
+  now: () => Date
+): Promise<void> {
+  await journal.record({ id: item.id, kind: item.kind }, state, now().toISOString());
+}
+
+async function recordAmbiguous(
+  journal: ExecutionJournal,
+  item: NormalizedConversation,
+  results: ExecuteManifestResult[],
+  now: () => Date,
+  message: string
+): Promise<never> {
+  try {
+    await recordState(journal, item, "ambiguous", now);
+  } catch {
+    abort("Unable to persist ambiguous archive state", results);
+  }
+  abort(message, results);
+}
+
+async function archiveOne(
+  item: NormalizedConversation,
+  options: ArchiveOptions,
+  results: ExecuteManifestResult[],
+  now: () => Date
+): Promise<void> {
+  try {
+    await recordState(options.journal, item, "pending", now);
+  } catch {
+    abort("Unable to persist pending archive state", results);
+  }
+
+  try {
+    await options.transport.archive(item);
+  } catch {
+    await recordAmbiguous(options.journal, item, results, now, `Archive request became ambiguous for ${item.id}`);
+  }
+
+  try {
+    await recordState(options.journal, item, "awaiting-verification", now);
+  } catch {
+    await recordAmbiguous(options.journal, item, results, now, `Archive request became ambiguous for ${item.id}`);
+  }
+
+  let verified = false;
+  try {
+    verified = await options.transport.verify(item);
+  } catch {
+    await recordAmbiguous(options.journal, item, results, now, `Verification became ambiguous for ${item.id}`);
+  }
+  if (!verified) {
+    await recordAmbiguous(options.journal, item, results, now, `Verification failed for ${item.id}`);
+  }
+
+  try {
+    await recordState(options.journal, item, "verified", now);
+  } catch {
+    await recordAmbiguous(options.journal, item, results, now, `Unable to persist verified archive state for ${item.id}`);
+  }
+
+  results.push({
+    id: item.id,
+    kind: item.kind,
+    previousArchived: false,
+    archivedAt: now().toISOString()
+  });
 }
 
 export async function executeArchive(options: ArchiveOptions): Promise<ArchiveRunResult> {
@@ -90,16 +165,8 @@ export async function executeArchive(options: ArchiveOptions): Promise<ArchiveRu
   }
 
   assertSafeMutation({ method: options.transport.mutationMethod, operation: "archive-conversation" });
-  await options.transport.archive(canary);
-  results.push({
-    id: canary.id,
-    kind: canary.kind,
-    previousArchived: false,
-    archivedAt: (options.now ?? (() => new Date()))().toISOString()
-  });
-  if (!(await options.transport.verify(canary))) {
-    abort(`Canary verification failed for ${canary.id}`, results);
-  }
+  const now = options.now ?? (() => new Date());
+  await archiveOne(canary, options, results, now);
 
   const afterCanary = await options.inventory.loadSnapshot();
   if (projectSetFingerprint(afterCanary.projectInventory) !== protectedFingerprint) {
@@ -117,16 +184,7 @@ export async function executeArchive(options: ArchiveOptions): Promise<ArchiveRu
     }
 
     assertSafeMutation({ method: options.transport.mutationMethod, operation: "archive-conversation" });
-    await options.transport.archive(item);
-    results.push({
-      id: item.id,
-      kind: item.kind,
-      previousArchived: false,
-      archivedAt: (options.now ?? (() => new Date()))().toISOString()
-    });
-    if (!(await options.transport.verify(item))) {
-      abort(`Verification failed for ${item.id}`, results);
-    }
+    await archiveOne(item, options, results, now);
   }
 
   return { candidatesSeen: initialCandidates.length, results };

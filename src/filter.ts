@@ -35,26 +35,40 @@ function mergedProjectStatus(left: ProjectStatus, right: ProjectStatus): Project
   return "CONFIRMED_NON_PROJECT";
 }
 
+function deterministicString(left: string | null, right: string | null): string | null {
+  if (left === null) {
+    return right;
+  }
+  if (right === null) {
+    return left;
+  }
+  return left <= right ? left : right;
+}
+
 function mergeDuplicate(left: NormalizedConversation, right: NormalizedConversation): NormalizedConversation {
   const leftTime = validTimestamp(left.lastActivity);
   const rightTime = validTimestamp(right.lastActivity);
   const datesConflict = left.lastActivity === null || right.lastActivity === null
     || leftTime === null || rightTime === null;
-  const latestDate = leftTime !== null && rightTime !== null
-    ? (leftTime >= rightTime ? left.lastActivity : right.lastActivity)
-    : null;
+  let latestDate: string | null = null;
+  if (!datesConflict && leftTime !== null && rightTime !== null
+    && left.lastActivity !== null && right.lastActivity !== null) {
+    latestDate = leftTime === rightTime
+      ? deterministicString(left.lastActivity, right.lastActivity)
+      : leftTime > rightTime ? left.lastActivity : right.lastActivity;
+  }
 
   return {
     id: left.id,
     kind: left.kind,
-    title: left.title ?? right.title,
+    title: deterministicString(left.title, right.title),
     archived: left.archived || right.archived,
     lastActivity: datesConflict ? null : latestDate,
     projectStatus: mergedProjectStatus(left.projectStatus, right.projectStatus)
   };
 }
 
-function deduplicate(items: NormalizedConversation[]): NormalizedConversation[] {
+export function deduplicateConversations(items: NormalizedConversation[]): NormalizedConversation[] {
   const byKey = new Map<string, NormalizedConversation>();
 
   for (const item of items) {
@@ -99,7 +113,7 @@ export function classifyConversations(
   const entries: ManifestEntry[] = [];
   const candidates: NormalizedConversation[] = [];
 
-  for (const item of deduplicate(items)) {
+  for (const item of deduplicateConversations(items)) {
     const action = actionFor(item, cutoffTimestamp);
     entries.push({
       id: item.id,

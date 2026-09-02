@@ -220,10 +220,8 @@ export class BrowserSession {
   }
 }
 
-export async function connectToChatGPT(cdpUrl: string = DEFAULT_CDP_URL): Promise<BrowserSession> {
-  const browser = await chromium.connectOverCDP(cdpUrl);
-  const pages = browser.contexts().flatMap((context) => context.pages());
-  const page = pages.find((candidate) => {
+export function selectUniqueChatGPTPage(pages: Page[]): Page {
+  const viablePages = pages.filter((candidate) => {
     try {
       assertChatGPTOrigin(candidate.url());
       return true;
@@ -232,9 +230,31 @@ export async function connectToChatGPT(cdpUrl: string = DEFAULT_CDP_URL): Promis
     }
   });
 
-  if (page === undefined) {
-    await browser.close();
+  if (viablePages.length === 0) {
     throw new Error("No authenticated https://chatgpt.com page found in the CDP browser");
+  }
+  if (viablePages.length !== 1) {
+    throw new Error("Ambiguous CDP browser: multiple https://chatgpt.com pages found");
+  }
+  const page = viablePages[0];
+  if (page === undefined) {
+    throw new Error("No authenticated https://chatgpt.com page found in the CDP browser");
+  }
+  return page;
+}
+
+export async function connectToChatGPT(
+  cdpUrl: string = DEFAULT_CDP_URL,
+  connectOverCDP: (url: string) => Promise<Browser> = (url) => chromium.connectOverCDP(url)
+): Promise<BrowserSession> {
+  const browser = await connectOverCDP(cdpUrl);
+  const pages = browser.contexts().flatMap((context) => context.pages());
+  let page: Page;
+  try {
+    page = selectUniqueChatGPTPage(pages);
+  } catch (error) {
+    await browser.close();
+    throw error;
   }
   return new BrowserSession(browser, page);
 }
