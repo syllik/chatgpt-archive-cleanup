@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CUTOFF,
   classifyConversations,
+  deduplicateConversations,
   type NormalizedConversation
 } from "../src/filter.js";
 
@@ -50,9 +51,23 @@ describe("classifyConversations", () => {
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0]).toMatchObject({
       id: "conversation-1",
-      title: "candidate copy",
+      title: "archived copy",
       action: "skip-archived"
     });
     expect(result.candidates).toEqual([]);
+  });
+
+  it("merges duplicate records independently of input order", () => {
+    const older = base({ title: "zeta", lastActivity: "2026-06-01T00:00:00Z" });
+    const newer = base({ title: "alpha", lastActivity: "2026-06-02T00:00:00Z" });
+
+    const forward = deduplicateConversations([older, newer]);
+    const reverse = deduplicateConversations([newer, older]);
+
+    expect(forward).toEqual(reverse);
+    expect(forward[0]).toMatchObject({
+      title: "alpha",
+      lastActivity: "2026-06-02T00:00:00Z"
+    });
   });
 });

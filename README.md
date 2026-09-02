@@ -2,7 +2,7 @@
 
 Local TypeScript/Node utility for a manually controlled, discovery-driven ChatGPT/Codex archive workflow.
 
-The default path is read-only. `discover` and `dry-run` execute zero account mutations. `execute` is implemented but requires both the `execute` subcommand and `--confirm-archive`. There is no delete operation.
+The default path is read-only. `discover` and `dry-run` execute zero account mutations. `execute` is implemented but requires the `execute` subcommand, `--confirm-archive`, and an explicitly reviewed dry-run manifest. There is no delete operation.
 
 ## Requirements
 
@@ -55,13 +55,14 @@ The default cutoff is `2026-06-02T18:10:00+07:00`; override it with `--cutoff IS
 
 ## Execution
 
-Do not run this until you have reviewed the dry-run manifest:
+Do not run this until you have reviewed a specific dry-run manifest:
 
 ```bash
-npm run archive -- execute --confirm-archive
+npm run archive -- execute --confirm-archive \
+  --dry-run-manifest ~/.local/state/chatgpt-archive-cleanup/runs/<reviewed-dry-run>.json
 ```
 
-Execution re-fetches inventory, performs one canary archive, verifies it, and then processes candidates serially. Any ambiguity, Project-set change, or failed verification stops the batch. Execute manifests retain only IDs, `previousArchived: false`, and timestamps for a future separately reviewed rollback task.
+`--confirm-archive` is insufficient by itself. Execution validates the reviewed manifest, cutoff, discovery provenance, and current browser/account context, then re-fetches the complete inventory and requires its safety metadata to match exactly. A CDP session with multiple ChatGPT pages/contexts is rejected. Each archive request is recorded in a metadata-only write-ahead journal before transport; unresolved journal entries block a new execute run. Execution performs one canary archive, verifies it, and then processes candidates serially. Any ambiguity, Project-set change, reviewed-inventory drift, or failed verification stops the batch. Execute manifests retain only IDs, `previousArchived: false`, and timestamps for a future separately reviewed rollback task.
 
 ## Development checks
 

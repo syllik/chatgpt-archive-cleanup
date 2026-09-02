@@ -7,6 +7,12 @@ import { discoverConfig, assertDiscoveryConfigShape, validateDiscoveryConfig, ty
 import { DEFAULT_CUTOFF, classifyConversations } from "./filter.js";
 import { loadConversationInventory, type PageFetcher } from "./inventory.js";
 import {
+  assertNoUnresolvedJournals,
+  assertReviewedEntriesMatch,
+  createExecutionJournal,
+  fingerprintAccountContext,
+  fingerprintDiscoveryConfig,
+  readReviewedDryRunManifest,
   readDiscoveryConfig,
   stateDirectory,
   writeDiscoveryConfig,
@@ -24,6 +30,7 @@ interface CliOptions {
   cdpUrl: string;
   cutoff: string;
   stateDir: string;
+  dryRunManifestPath: string | null;
   waitSeconds: number;
   confirmArchive: boolean;
 }
@@ -31,6 +38,7 @@ interface CliOptions {
 export interface CliSession extends DiscoveryRuntime {
   fetchOperation(operation: PageOperation, query: Readonly<Record<string, string>>): Promise<unknown>;
   archiveConversation(operation: ArchiveOperation, id: string): Promise<unknown>;
+  accountFingerprint?: () => Promise<string | null>;
   disconnect(): Promise<void>;
 }
 
@@ -50,12 +58,12 @@ const HELP = [
   "Usage:",
   "  npm run archive -- discover [--cdp URL] [--wait-seconds N]",
   "  npm run archive -- dry-run [--cdp URL] [--cutoff ISO] [--state-dir PATH]",
-  "  npm run archive -- execute --confirm-archive [--cdp URL] [--cutoff ISO] [--state-dir PATH]",
+  "  npm run archive -- execute --confirm-archive --dry-run-manifest PATH [--cdp URL] [--cutoff ISO] [--state-dir PATH]",
   "",
   "Commands:",
   "  discover  Observe the current client and save a redacted discovery config.",
   "  dry-run   Scan the complete inventory and save a metadata-only candidate manifest.",
-  "  execute   Archive serially with a canary; requires --confirm-archive.",
+  "  execute   Archive serially with a canary; requires confirmation and a reviewed dry-run manifest.",
   "",
   `The default cutoff is ${DEFAULT_CUTOFF}.`,
   "No command ever deletes conversations or projects.",
@@ -80,6 +88,7 @@ function parseOptions(argv: string[]): CliOptions & { help: boolean } {
   let cdpUrl = DEFAULT_CDP_URL;
   let cutoff = DEFAULT_CUTOFF;
   let stateDir = stateDirectory();
+  let dryRunManifestPath: string | null = null;
   let waitSeconds = 15;
   let confirmArchive = false;
   let help = false;
@@ -114,6 +123,10 @@ function parseOptions(argv: string[]): CliOptions & { help: boolean } {
       stateDir = nextValue();
       continue;
     }
+    if (argument === "--dry-run-manifest") {
+      dryRunManifestPath = nextValue();
+      continue;
+    }
     if (argument === "--wait-seconds") {
       waitSeconds = parseNumber(nextValue(), "--wait-seconds");
       continue;
@@ -128,7 +141,7 @@ function parseOptions(argv: string[]): CliOptions & { help: boolean } {
     throw new Error(`Unknown argument: ${argument}`);
   }
 
-  return { command, cdpUrl, cutoff, stateDir, waitSeconds, confirmArchive, help };
+  return { command, cdpUrl, cutoff, stateDir, dryRunManifestPath, waitSeconds, confirmArchive, help };
 }
 
 function outputResult(dependencies: CliDependencies, exitCode: number, output: string): CliResult {
@@ -146,6 +159,11 @@ async function validateCurrentClient(session: CliSession, config: DiscoveryConfi
   const observed = await session.observeRequests(0);
   const archiveEvidence = await session.inspectArchiveBundle();
   validateDiscoveryConfig(config, observed, archiveEvidence);
+}
+
+async function currentAccountFingerprint(session: CliSession): Promise<string | null> {
+  const value = await session.accountFingerprint?.();
+  return value === null || value === undefined ? null : fingerprintAccountContext(value);
 }
 
 async function inventorySnapshot(session: CliSession, config: DiscoveryConfig): Promise<ArchiveSnapshot> {
@@ -255,6 +273,27 @@ export async function runCli(
     return outputResult(providedDependencies, 2, "Refusing to execute without --confirm-archive\n");
   }
 
+  let preloadedConfig: DiscoveryConfig | null = null;
+  let reviewedManifest: Awaited<ReturnType<typeof readReviewedDryRunManifest>> | null = null;
+  if (options.command === "execute") {
+    if (options.dryRunManifestPath === null) {
+      return outputResult(providedDependencies, 2,
+        "Refusing to execute without --dry-run-manifest PATH referencing a reviewed dry run\n");
+    }
+    try {
+      preloadedConfig = await currentConfig(options.stateDir);
+      reviewedManifest = await readReviewedDryRunManifest(
+        options.dryRunManifestPath,
+        options.cutoff,
+        fingerprintDiscoveryConfig(preloadedConfig)
+      );
+      await assertNoUnresolvedJournals(options.stateDir);
+    } catch {
+      return outputResult(providedDependencies, 2,
+        "Refusing to execute: reviewed dry run, discovery provenance, or prior journal is invalid\n");
+    }
+  }
+
   let session: CliSession | null = null;
   try {
     session = await providedDependencies.connect(options.cdpUrl);
@@ -264,7 +303,7 @@ export async function runCli(
       return outputResult(providedDependencies, 0, `Discovery complete.\nConfig:\n${path}\n`);
     }
 
-    const config = await currentConfig(options.stateDir);
+    const config = preloadedConfig ?? await currentConfig(options.stateDir);
     await validateCurrentClient(session, config);
     if (options.command === "dry-run") {
       const snapshot = await inventorySnapshot(session, config);
@@ -272,7 +311,17 @@ export async function runCli(
         applyProjectStatuses(snapshot.conversations, snapshot.projectInventory),
         options.cutoff
       );
-      const path = await writeDryRunManifest(options.stateDir, options.cutoff, classified.entries);
+      const path = await writeDryRunManifest(
+        options.stateDir,
+        options.cutoff,
+        classified.entries,
+        new Date(),
+        {
+          origin: "https://chatgpt.com",
+          discoveryConfigFingerprint: fingerprintDiscoveryConfig(config),
+          accountFingerprint: await currentAccountFingerprint(session)
+        }
+      );
       return outputResult(providedDependencies, 0,
         dryRunOutput(options.cutoff, snapshot.conversations, classified.entries, path));
     }
@@ -280,11 +329,27 @@ export async function runCli(
     const inventory: InventorySource = {
       loadSnapshot: () => inventorySnapshot(session as CliSession, config)
     };
+    if (reviewedManifest === null) {
+      throw new Error("Reviewed dry-run manifest is required for execute");
+    }
+    const reviewedSnapshot = await inventorySnapshot(session, config);
+    const reviewedClassification = classifyConversations(
+      applyProjectStatuses(reviewedSnapshot.conversations, reviewedSnapshot.projectInventory),
+      options.cutoff
+    );
+    assertReviewedEntriesMatch(reviewedManifest.entries, reviewedClassification.entries);
+    const currentFingerprint = await currentAccountFingerprint(session);
+    if (reviewedManifest.provenance.accountFingerprint !== currentFingerprint) {
+      throw new Error("Authenticated account/workspace fingerprint does not match reviewed dry run");
+    }
+
+    const journal = await createExecutionJournal(options.stateDir);
     const result = await executeArchive({
       cutoff: options.cutoff,
       confirmArchive: options.confirmArchive,
       inventory,
-      transport: archiveTransport(session, config)
+      transport: archiveTransport(session, config),
+      journal
     });
     const path = await writeExecuteManifest(options.stateDir, options.cutoff, result.results);
     return outputResult(providedDependencies, 0,
