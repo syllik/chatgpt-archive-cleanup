@@ -2,6 +2,7 @@
   "name": "chatgpt-archive-cleanup",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "A local, discovery-driven ChatGPT/Codex archive utility.",
   "type": "module",
   "engines": {
