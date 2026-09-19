@@ -6,7 +6,7 @@ The default path is read-only. `discover` and `dry-run` execute zero account mut
 
 ## Requirements
 
-- Node `22.23.2` (the package engine accepts Node 22.23.2 through 22.x)
+- Node `24.21.0` (the package engine pins this validated LTS runtime)
 - A separate Chrome profile connected to ChatGPT by CDP
 
 Install dependencies:
