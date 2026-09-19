@@ -6,7 +6,7 @@
   "description": "A local, discovery-driven ChatGPT/Codex archive utility.",
   "type": "module",
   "engines": {
-    "node": ">=22.23.2 <23"
+    "node": "24.21.0"
   },
   "scripts": {
     "archive": "tsx src/cli.ts",
